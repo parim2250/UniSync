@@ -1,0 +1,9 @@
+CC = gcc
+CFLAGS = -Wall -Wextra -g -pthread
+LDFLAGS = -pthread -luuid
+all: bin/UniSync
+bin/UniSync: src/main.c
+@mkdir -p bin
+$(CC) $(CFLAGS) -o bin/UniSync src/main.c $(LDFLAGS)
+clean: 
+rm -rf bin/* obj/*
