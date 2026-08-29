@@ -1,5 +1,6 @@
-# UniSync Makefile — Layer 1
-# Builds: bin/unisync, bin/unisync-server, bin/unisync-client
+# UniSync Makefile — Layer 2
+# Builds: bin/UniSync, bin/UniSync-server, bin/UniSync-client,
+#         bin/UniSync-file-receiver, bin/UniSync-file-sender
 
 CC      = gcc
 CFLAGS  = -Wall -Wextra -Iinclude
@@ -7,36 +8,35 @@ SRCDIR  = src
 OBJDIR  = obj
 BINDIR  = bin
 
-# ── Targets ──────────────────────────────────────────────
+all: $(BINDIR)/UniSync $(BINDIR)/UniSync-server $(BINDIR)/UniSync-client \
+     $(BINDIR)/UniSync-file-receiver $(BINDIR)/UniSync-file-sender
 
-all: $(BINDIR)/UniSync $(BINDIR)/UniSync-server $(BINDIR)/UniSync-client
-
-# Main entry point (your original "UniSync v0.1 initialized")
+# Core binaries
 $(BINDIR)/UniSync: $(OBJDIR)/main.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# TCP server
 $(BINDIR)/UniSync-server: $(OBJDIR)/server.o $(OBJDIR)/network.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# TCP client
 $(BINDIR)/UniSync-client: $(OBJDIR)/client.o $(OBJDIR)/network.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# ── Pattern Rule: compile any .c in src/ to .o in obj/ ──
+# Layer 2 File Transfer binaries
+$(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o | $(BINDIR)
+	$(CC) $(CFLAGS) -o $@ $^
 
+$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o | $(BINDIR)
+	$(CC) $(CFLAGS) -o $@ $^
+
+# Pattern Rule
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
-
-# ── Directory creation ───────────────────────────────────
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 $(BINDIR):
 	mkdir -p $(BINDIR)
-
-# ── Cleanup ──────────────────────────────────────────────
 
 clean:
 	rm -rf $(OBJDIR)/* $(BINDIR)/*
