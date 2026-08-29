@@ -1,6 +1,4 @@
-# UniSync Makefile — Layer 2
-# Builds: bin/UniSync, bin/UniSync-server, bin/UniSync-client,
-#         bin/UniSync-file-receiver, bin/UniSync-file-sender
+# UniSync Makefile — Layer 3
 
 CC      = gcc
 CFLAGS  = -Wall -Wextra -Iinclude
@@ -11,7 +9,6 @@ BINDIR  = bin
 all: $(BINDIR)/UniSync $(BINDIR)/UniSync-server $(BINDIR)/UniSync-client \
      $(BINDIR)/UniSync-file-receiver $(BINDIR)/UniSync-file-sender
 
-# Core binaries
 $(BINDIR)/UniSync: $(OBJDIR)/main.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
@@ -21,14 +18,13 @@ $(BINDIR)/UniSync-server: $(OBJDIR)/server.o $(OBJDIR)/network.o | $(BINDIR)
 $(BINDIR)/UniSync-client: $(OBJDIR)/client.o $(OBJDIR)/network.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# Layer 2 File Transfer binaries
-$(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o | $(BINDIR)
+# Now includes protocol.o
+$(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o | $(BINDIR)
+$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# Pattern Rule
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
