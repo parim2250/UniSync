@@ -22,7 +22,7 @@ $(BINDIR)/UniSync-client: $(OBJDIR)/client.o $(OBJDIR)/network.o | $(BINDIR)
 $(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o | $(BINDIR)
+$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o $(OBJDIR)/discovery.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(BINDIR)/UniSync-discover: $(OBJDIR)/discover_main.o $(OBJDIR)/discovery.o | $(BINDIR)
