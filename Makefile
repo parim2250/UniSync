@@ -1,4 +1,4 @@
-# UniSync Makefile — Layer 5
+# UniSync Makefile — Layer 6
 
 CC      = gcc
 CFLAGS  = -Wall -Wextra -Iinclude
@@ -7,7 +7,8 @@ OBJDIR  = obj
 BINDIR  = bin
 
 all: $(BINDIR)/UniSync $(BINDIR)/UniSync-server $(BINDIR)/UniSync-client \
-     $(BINDIR)/UniSync-file-receiver $(BINDIR)/UniSync-file-sender
+     $(BINDIR)/UniSync-file-receiver $(BINDIR)/UniSync-file-sender \
+     $(BINDIR)/UniSync-discover
 
 $(BINDIR)/UniSync: $(OBJDIR)/main.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
@@ -22,6 +23,9 @@ $(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/network.o $
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o | $(BINDIR)
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(BINDIR)/UniSync-discover: $(OBJDIR)/discover_main.o $(OBJDIR)/discovery.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
