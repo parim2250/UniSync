@@ -1,43 +1,34 @@
-# UniSync Makefile — Layer 6
+CC       = gcc
+CFLAGS   = -Wall -Wextra -g -pthread
+LDFLAGS  = -pthread -luuid
 
-CC      = gcc
-CFLAGS  = -Wall -Wextra -Iinclude
-SRCDIR  = src
-OBJDIR  = obj
-BINDIR  = bin
+SRC_DIR  = src
+OBJ_DIR  = obj
+BIN_DIR  = bin
 
-all: $(BINDIR)/UniSync $(BINDIR)/UniSync-server $(BINDIR)/UniSync-client \
-     $(BINDIR)/UniSync-file-receiver $(BINDIR)/UniSync-file-sender \
-     $(BINDIR)/UniSync-discover
+# All source files (add new .c files here as you build them)
+SOURCES  = $(wildcard $(SRC_DIR)/*.c)
+OBJECTS  = $(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+TARGET   = $(BIN_DIR)/unisync
 
-$(BINDIR)/UniSync: $(OBJDIR)/main.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
+.PHONY: all clean test test-threads
 
-$(BINDIR)/UniSync-server: $(OBJDIR)/server.o $(OBJDIR)/network.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
+all: dirs $(TARGET)
 
-$(BINDIR)/UniSync-client: $(OBJDIR)/client.o $(OBJDIR)/network.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
+dirs:
+	@mkdir -p $(OBJ_DIR) $(BIN_DIR)
 
-$(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
+$(TARGET): $(OBJECTS)
+	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
+	@echo "  ✓ Build complete: $(TARGET)"
 
-$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o $(OBJDIR)/discovery.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BINDIR)/UniSync-discover: $(OBJDIR)/discover_main.o $(OBJDIR)/discovery.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
-
-$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-$(OBJDIR):
-	mkdir -p $(OBJDIR)
-
-$(BINDIR):
-	mkdir -p $(BINDIR)
+# Standalone threading demo
+test-threads: dirs
+	$(CC) $(CFLAGS) -o $(BIN_DIR)/test_threads tests/test_threads.c $(LDFLAGS)
+	@echo "  Run: ./$(BIN_DIR)/test_threads"
 
 clean:
-	rm -rf $(OBJDIR)/* $(BINDIR)/*
-
-.PHONY: all clean
+	rm -rf $(OBJ_DIR)/* $(BIN_DIR)/*
