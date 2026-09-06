@@ -1,16 +1,11 @@
-# UniSync Makefile — Layer 6
-
 CC      = gcc
-CFLAGS  = -Wall -Wextra -Iinclude
+CFLAGS  = -Wall -Wextra -Iinclude -pthread
 SRCDIR  = src
 OBJDIR  = obj
 BINDIR  = bin
 
-all: $(BINDIR)/UniSync \
-     $(BINDIR)/UniSync-server \
-     $(BINDIR)/UniSync-client \
-     $(BINDIR)/UniSync-file-receiver \
-     $(BINDIR)/UniSync-file-sender \
+all: $(BINDIR)/UniSync $(BINDIR)/UniSync-server $(BINDIR)/UniSync-client \
+     $(BINDIR)/UniSync-file-receiver $(BINDIR)/UniSync-file-sender \
      $(BINDIR)/UniSync-discover
 
 $(BINDIR)/UniSync: $(OBJDIR)/main.o | $(BINDIR)
@@ -22,10 +17,14 @@ $(BINDIR)/UniSync-server: $(OBJDIR)/server.o $(OBJDIR)/network.o | $(BINDIR)
 $(BINDIR)/UniSync-client: $(OBJDIR)/client.o $(OBJDIR)/network.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o | $(BINDIR)
+$(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/handler.o \
+    $(OBJDIR)/network.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o \
+    $(OBJDIR)/errors.o $(OBJDIR)/transfer.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o $(OBJDIR)/transfer.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o $(OBJDIR)/discovery.o | $(BINDIR)
+$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o \
+    $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o \
+    $(OBJDIR)/discovery.o $(OBJDIR)/transfer.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(BINDIR)/UniSync-discover: $(OBJDIR)/discover_main.o $(OBJDIR)/discovery.o | $(BINDIR)

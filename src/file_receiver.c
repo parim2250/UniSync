@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 
 #include "network.h"
-#include "protocol.h"
 #include "errors.h"
+#include "handler.h"
 
 int main(int argc, char *argv[])
 {
@@ -13,65 +15,52 @@ int main(int argc, char *argv[])
     const char *save_dir = (argc > 2) ? argv[2] : ".";
 
     if (port < 1 || port > 65535) {
-        fprintf(stderr, "[error] %s\n", unisync_strerror(ERR_INVALID_PORT));
+        fprintf(stderr, "[error] bad port\n");
         return 1;
     }
-
-    int err = validate_dir_writable(save_dir);
-    if (err != UNISYNC_SUCCESS) {
-        fprintf(stderr, "[error] %s: %s\n", save_dir, unisync_strerror(err));
+    if (validate_dir_writable(save_dir) != UNISYNC_SUCCESS) {
+        fprintf(stderr, "[error] directory not writable: %s\n", save_dir);
         return 1;
     }
 
     int server_fd = start_server(port);
     if (server_fd == -1) return 1;
 
-    printf("[receiver] Waiting on port %d ...\n", port);
+    printf("[receiver] Multithreaded + Accept/Reject on port %d\n", port);
+    printf("[receiver] Saving to: %s\n", save_dir);
+    printf("[receiver] Ctrl+C to stop.\n");
 
-    int client_fd = accept(server_fd, NULL, NULL);
-    if (client_fd == -1) {
-        perror("accept");
-        close_socket(server_fd);
-        return 1;
+    while (1) {
+        struct sockaddr_in caddr;
+        socklen_t clen = sizeof(caddr);
+
+        int client_fd = accept(server_fd, (struct sockaddr *)&caddr, &clen);
+        if (client_fd == -1) {
+            perror("accept");
+            continue;
+        }
+
+        ClientContext *ctx = malloc(sizeof(ClientContext));
+        if (!ctx) {
+            close_socket(client_fd);
+            continue;
+        }
+        ctx->client_fd = client_fd;
+        strncpy(ctx->save_dir, save_dir, sizeof(ctx->save_dir) - 1);
+        ctx->save_dir[sizeof(ctx->save_dir) - 1] = '\0';
+        strncpy(ctx->client_ip, inet_ntoa(caddr.sin_addr), sizeof(ctx->client_ip) - 1);
+        ctx->client_ip[sizeof(ctx->client_ip) - 1] = '\0';
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handle_client, ctx) != 0) {
+            perror("pthread_create");
+            close_socket(client_fd);
+            free(ctx);
+            continue;
+        }
+        pthread_detach(tid);
     }
 
-    FileHeader header;
-    if (receive_file_header(client_fd, &header) == -1) {
-        close_socket(client_fd);
-        close_socket(server_fd);
-        return 1;
-    }
-
-    /* Accept / Reject prompt */
-    double mb = header.filesize / (1024.0 * 1024.0);
-    printf("\nIncoming file: \"%s\" (%.2f MB)\n", header.filename, mb);
-    printf("Accept? (y/n): ");
-
-    char answer[8];
-    if (!fgets(answer, sizeof(answer), stdin) || (answer[0] != 'y' && answer[0] != 'Y')) {
-        send(client_fd, "REJECT", 7, 0);
-        printf("[receiver] Rejected.\n");
-        close_socket(client_fd);
-        close_socket(server_fd);
-        return 0;
-    }
-
-    send(client_fd, "ACCEPT", 7, 0);
-    printf("[receiver] Accepted. Receiving...\n");
-
-    char output_path[512];
-    snprintf(output_path, sizeof(output_path), "%s/%s", save_dir, header.filename);
-
-    ssize_t bytes = receive_file_payload(client_fd, output_path, header.filesize);
-
-    close_socket(client_fd);
     close_socket(server_fd);
-
-    if (bytes < 0) {
-        fprintf(stderr, "[error] Transfer failed.\n");
-        return 1;
-    }
-
-    printf("[receiver] SUCCESS — saved to \"%s\"\n", output_path);
     return 0;
 }
