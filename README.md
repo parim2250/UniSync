@@ -1,2 +1,7 @@
 # UniSync
-Campus Local File Sharing Tool for Linux.
+
+Campus LAN file sharing for Linux (AirDrop-style). No cloud.
+
+## Build
+```bash
+make clean && make

@@ -2,3 +2,8 @@ bin/
 obj/
 *.o
 *.log
+logs/
+downloads/
+*.bin
+test_*.sh
+.DS_Store
