@@ -4,13 +4,15 @@
  * All POSIX socket calls are wrapped here so the rest of
  * the project never calls socket()/bind()/listen() directly.
  */
-#include "network.h"
+
 #include <stdio.h>       /* perror(), printf() */
 #include <stdlib.h>      /* exit() */
 #include <string.h>      /* strlen(), memset() */
 #include <unistd.h>      /* close() */
 #include <arpa/inet.h>   /* inet_addr(), htons(), struct sockaddr_in */
 #include <sys/socket.h>  /* socket(), bind(), listen(), accept(), send(), recv() */
+
+#include "network.h"
 
 /* ── Create a TCP socket ──────────────────────────────── */
 int create_tcp_socket(void)
