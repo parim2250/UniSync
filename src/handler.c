@@ -58,7 +58,7 @@ void *handle_client(void *arg)
     char output_path[512];
     snprintf(output_path, sizeof(output_path), "%s/%s", ctx->save_dir, header.filename);
 
-    ssize_t bytes = receive_file_payload(fd, output_path, header.filesize);
+    ssize_t bytes = receive_file_payload(fd, output_path, header.filesize, header.mode);
 
     pthread_mutex_lock(&io_lock);
     if (bytes < 0)
