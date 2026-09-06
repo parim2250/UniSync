@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 
+#include "logger.h"
 #include "handler.h"
 #include "network.h"
 #include "protocol.h"
@@ -21,6 +22,10 @@ void *handle_client(void *arg)
         free(ctx);
         return NULL;
     }
+
+    log_info("Incoming from %s file=%s size=%lu mode=0%o",
+             ctx->client_ip, header.filename,
+             (unsigned long)header.filesize, header.mode & 0777);
 
     double mb = header.filesize / (1024.0 * 1024.0);
     char answer[8];
@@ -40,6 +45,7 @@ void *handle_client(void *arg)
 
     if (answer[0] != 'y' && answer[0] != 'Y') {
         send(fd, "REJECT", 7, MSG_NOSIGNAL);
+        log_info("Rejected %s from %s", header.filename, ctx->client_ip);
         pthread_mutex_lock(&io_lock);
         printf("[thread] Rejected \"%s\" from %s\n", header.filename, ctx->client_ip);
         pthread_mutex_unlock(&io_lock);
@@ -49,6 +55,7 @@ void *handle_client(void *arg)
     }
 
     send(fd, "ACCEPT", 7, MSG_NOSIGNAL);
+    log_info("Accepted %s from %s", header.filename, ctx->client_ip);
 
     pthread_mutex_lock(&io_lock);
     printf("[thread] Accepted \"%s\" from %s — receiving...\n",
@@ -59,6 +66,11 @@ void *handle_client(void *arg)
     snprintf(output_path, sizeof(output_path), "%s/%s", ctx->save_dir, header.filename);
 
     ssize_t bytes = receive_file_payload(fd, output_path, header.filesize, header.mode);
+
+    if (bytes < 0)
+        log_error("Transfer failed: %s from %s", header.filename, ctx->client_ip);
+    else
+        log_info("Transfer complete: %s (%ld bytes)", header.filename, (long)bytes);
 
     pthread_mutex_lock(&io_lock);
     if (bytes < 0)

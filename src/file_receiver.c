@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
+#include "logger.h"
 #include "network.h"
 #include "errors.h"
 #include "handler.h"

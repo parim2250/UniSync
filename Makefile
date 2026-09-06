@@ -19,7 +19,7 @@ $(BINDIR)/UniSync-client: $(OBJDIR)/client.o $(OBJDIR)/network.o | $(BINDIR)
 
 $(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/handler.o \
     $(OBJDIR)/network.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o \
-    $(OBJDIR)/errors.o $(OBJDIR)/transfer.o | $(BINDIR)
+    $(OBJDIR)/errors.o $(OBJDIR)/transfer.o $(OBJDIR)/logger.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o \
