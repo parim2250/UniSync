@@ -61,4 +61,24 @@ int receive_message(int sockfd, char *buffer, int buf_size);
  */
 void close_socket(int sockfd);
 
+/* ── UniSync v2 framed I/O (used by the transfer protocol) ─ */
+#include <stdint.h>
+#include <stddef.h>
+
+int  tcp_listen(int port);                              /* quiet start_server()            */
+int  tcp_connect(const char *ip, int port, int secs);   /* connect with a timeout          */
+void set_timeout(int fd, int secs);                     /* SO_RCVTIMEO + SO_SNDTIMEO       */
+int  net_send(int fd, const void *b, size_t n);         /* send all (encrypts if enabled)  */
+int  net_recv(int fd, void *b, size_t n);               /* recv all (decrypts if enabled)  */
+int  put_u8(int fd, uint8_t v);
+int  put_u16(int fd, uint16_t v);
+int  put_u32(int fd, uint32_t v);
+int  put_u64(int fd, uint64_t v);
+int  put_str(int fd, const char *s);
+int  get_u8(int fd, uint8_t *v);
+int  get_u16(int fd, uint16_t *v);
+int  get_u32(int fd, uint32_t *v);
+int  get_u64(int fd, uint64_t *v);
+int  get_str(int fd, char *buf, size_t cap);
+
 #endif /* NETWORK_H */

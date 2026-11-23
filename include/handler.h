@@ -3,10 +3,11 @@
 
 typedef struct {
     int  client_fd;
-    char save_dir[256];
+    char save_dir[4096];
     char client_ip[16];
 } ClientContext;
 
-void *handle_client(void *arg);
+void  handler_init(int max_concurrent);    /* limits simultaneous transfers (semaphore) */
+void *handle_client(void *arg);            /* one pthread per incoming connection        */
 
 #endif
