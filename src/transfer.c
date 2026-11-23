@@ -1,114 +1,157 @@
-/*
- * transfer.c — UniSync File Transfer Implementation
- *
- * Implements chunked reading from disk to socket, and chunked writing
- * from socket to disk using raw Unix file descriptors.
- */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-
+#include "common.h"
+#include "util.h"
+#include "network.h"
+#include "sha256.h"
+#include "logger.h"
 #include "transfer.h"
+#include <dirent.h>
+#include <sys/wait.h>
 
-/* Helper: Ensures ALL bytes are sent over the socket (handles partial sends) */
-static ssize_t send_all(int sockfd, const char *buf, size_t len)
+/* ====================== sender side ====================== */
+static Entry *entry_new(EntryList *l)
 {
-    size_t total_sent = 0;
-    while (total_sent < len) {
-        ssize_t sent = send(sockfd, buf + total_sent, len - total_sent, 0);
-        if (sent <= 0) {
-            perror("send() failed during file transfer");
-            return -1;
-        }
-        total_sent += sent;
+    if (l->n == l->cap) {
+        size_t nc = l->cap ? l->cap * 2 : 32;
+        Entry *nv = realloc(l->v, nc * sizeof(Entry));
+        if (!nv) return NULL;
+        l->v = nv; l->cap = nc;
     }
-    return total_sent;
+    Entry *e = &l->v[l->n++]; memset(e, 0, sizeof *e); return e;
 }
 
-/* Helper: Ensures ALL bytes are written to disk (handles partial writes) */
-static ssize_t write_all(int file_fd, const char *buf, size_t len)
+void entries_free(EntryList *l) { free(l->v); l->v = NULL; l->n = l->cap = 0; }
+
+const char *file_type_of(const char *name)
 {
-    size_t total_written = 0;
-    while (total_written < len) {
-        ssize_t written = write(file_fd, buf + total_written, len - total_written);
-        if (written <= 0) {
-            perror("write() failed to disk");
-            return -1;
-        }
-        total_written += written;
-    }
-    return total_written;
+    const char *b = strrchr(name, '/'); b = b ? b + 1 : name;
+    const char *d = strrchr(b, '.');
+    return (d && d[1] && strlen(d + 1) < 16) ? d + 1 : "file";
 }
 
-/* ── Send File Data ────────────────────────────────────── */
-ssize_t send_file_data(int sockfd, const char *filepath)
+int entries_collect(EntryList *l, const char *abs, const char *rel)
 {
-    int file_fd = open(filepath, O_RDONLY);
-    if (file_fd == -1) {
-        perror("open() failed for reading");
-        return -1;
-    }
-
-    char buffer[CHUNK_SIZE];
-    ssize_t bytes_read;
-    ssize_t total_sent = 0;
-
-    /* Loop: Read CHUNK_SIZE from disk -> send over network */
-    while ((bytes_read = read(file_fd, buffer, CHUNK_SIZE)) > 0) {
-        if (send_all(sockfd, buffer, bytes_read) == -1) {
-            close(file_fd);
-            return -1;
+    struct stat st;
+    if (lstat(abs, &st) < 0) { us_print("  skipping %s: %s\n", abs, strerror(errno)); return 0; }
+    if (S_ISLNK(st.st_mode)) { us_print("  skipping symlink %s\n", abs); return 0; }
+    if (S_ISDIR(st.st_mode)) {
+        Entry *e = entry_new(l); if (!e) return -1;
+        snprintf(e->abs, sizeof e->abs, "%s", abs); snprintf(e->rel, sizeof e->rel, "%s", rel);
+        e->isdir = 1; e->mode = st.st_mode & 0777;
+        DIR *d = opendir(abs);
+        if (!d) { us_print("  cannot open folder %s: %s\n", abs, strerror(errno)); return 0; }
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            size_t al = strlen(de->d_name);
+            if (al >= 13 && (!strcmp(de->d_name + al - 13, ".unisync.part") || !strcmp(de->d_name + al - 13, ".unisync.meta"))) continue;
+            char a2[PATH_MAX], r2[4096];
+            if (snprintf(a2, sizeof a2, "%s/%s", abs, de->d_name) >= (int)sizeof a2) continue;
+            if (snprintf(r2, sizeof r2, "%s/%s", rel, de->d_name) >= (int)sizeof r2) continue;
+            if (entries_collect(l, a2, r2) < 0) { closedir(d); return -1; }
         }
-        total_sent += bytes_read;
+        closedir(d);
+        return 0;
     }
-
-    if (bytes_read == -1) {
-        perror("read() failed from file");
-        close(file_fd);
-        return -1;
+    if (S_ISREG(st.st_mode)) {
+        Entry *e = entry_new(l); if (!e) return -1;
+        snprintf(e->abs, sizeof e->abs, "%s", abs); snprintf(e->rel, sizeof e->rel, "%s", rel);
+        e->size = (uint64_t)st.st_size; e->mode = st.st_mode & 0777;
+        return 0;
     }
-
-    close(file_fd);
-    printf("[transfer] Sent total %ld bytes from file: %s\n", (long)total_sent, filepath);
-    return total_sent;
+    us_print("  skipping special file %s\n", abs);
+    return 0;
 }
 
-/* ── Receive File Data ─────────────────────────────────── */
-ssize_t receive_file_data(int sockfd, const char *output_path)
+int send_file_body(int fd, const char *abs, uint64_t offset, uint64_t size, uint8_t *buf, size_t chunk,
+                   ProgressTracker *pt, int *drop, uint64_t *sent)
 {
-    /* O_CREAT: create file if missing, O_TRUNC: overwrite if exists */
-    /* 0644: permissions (rw-r--r--) */
-    int file_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (file_fd == -1) {
-        perror("open() failed for writing");
-        return -1;
+    int ff = open(abs, O_RDONLY);
+    if (ff < 0) return -2;
+    if (lseek(ff, (off_t)offset, SEEK_SET) < 0) { close(ff); return -2; }
+    uint64_t remaining = size - offset;
+    while (remaining) {
+        size_t n = remaining > chunk ? chunk : (size_t)remaining;
+        if (fd_read_full(ff, buf, n) < 0) { close(ff); return -2; }           /* file shrank while sending */
+        if (net_send(fd, buf, n) < 0) { close(ff); return -1; }
+        remaining -= n; *sent += n; progress_update(pt, n);
+        if (*drop > 0 && *sent >= (uint64_t)*drop) { *drop = 0; close(ff); return -1; }
     }
+    close(ff);
+    return 0;
+}
 
-    char buffer[CHUNK_SIZE];
-    ssize_t bytes_received;
-    ssize_t total_written = 0;
-
-    /* Loop: Read from network socket -> write to disk */
-    while ((bytes_received = recv(sockfd, buffer, CHUNK_SIZE, 0)) > 0) {
-        if (write_all(file_fd, buffer, bytes_received) == -1) {
-            close(file_fd);
-            return -1;
-        }
-        total_written += bytes_received;
+/* ====================== receiver side ====================== */
+int safe_relpath(const char *r)
+{
+    if (!*r || r[0] == '/') return 0;
+    const char *p = r;
+    while (*p) {
+        const char *e = strchr(p, '/'); size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n == 0 || (n == 2 && !strncmp(p, "..", 2)) || (n == 1 && p[0] == '.')) return 0;
+        if (!e) break;
+        p = e + 1;
     }
+    return 1;
+}
 
-    if (bytes_received == -1) {
-        perror("recv() failed from socket");
-        close(file_fd);
-        return -1;
+static int meta_matches(const char *meta, uint64_t size, const char *hex)
+{
+    FILE *f = fopen(meta, "r"); if (!f) return 0;
+    unsigned long long s; char h[80];
+    int ok = (fscanf(f, "%llu %64s", &s, h) == 2 && s == size && !strcmp(h, hex));
+    fclose(f); return ok;
+}
+
+uint64_t resume_offset(const char *path, uint64_t size, const uint8_t hash[32], int *already)
+{
+    char part[PATH_MAX + 16], meta[PATH_MAX + 16], hex[65];
+    snprintf(part, sizeof part, "%s.unisync.part", path);
+    snprintf(meta, sizeof meta, "%s.unisync.meta", path);
+    hex_encode(hash, 32, hex);
+    *already = 0;
+    struct stat st; uint8_t h2[32]; uint64_t sz2;
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode) && (uint64_t)st.st_size == size &&
+        sha256_file(path, h2, &sz2) == 0 && !memcmp(h2, hash, 32)) { *already = 1; return size; }   /* identical file already here */
+    if (meta_matches(meta, size, hex) && stat(part, &st) == 0 && (uint64_t)st.st_size <= size)
+        return (uint64_t)st.st_size;                                                                /* partial data on disk */
+    FILE *mf = fopen(meta, "w");
+    if (mf) { fprintf(mf, "%llu %s\n", (unsigned long long)size, hex); fclose(mf); }
+    return 0;
+}
+
+int receive_file_body(int fd, const char *path, uint64_t size, uint64_t offset, uint32_t mode,
+                      const uint8_t hash[32], uint8_t *buf, size_t chunk, ProgressTracker *pt)
+{
+    char part[PATH_MAX + 16], meta[PATH_MAX + 16];
+    snprintf(part, sizeof part, "%s.unisync.part", path);
+    snprintf(meta, sizeof meta, "%s.unisync.meta", path);
+    int fo = open(part, O_WRONLY | O_CREAT, 0644);
+    if (fo < 0 || ftruncate(fo, (off_t)offset) < 0 || lseek(fo, (off_t)offset, SEEK_SET) < 0) {
+        log_error("open %s: %s", part, strerror(errno)); if (fo >= 0) close(fo); return -1;
     }
+    uint64_t remaining = size - offset;
+    while (remaining) {
+        size_t n = remaining > chunk ? chunk : (size_t)remaining;
+        if (net_recv(fd, buf, n) < 0) { close(fo); return -1; }               /* .part stays -> resumable */
+        if (fd_write_full(fo, buf, n) < 0) { log_error("write %s: %s", part, strerror(errno)); close(fo); return -1; }
+        remaining -= n; progress_update(pt, n);
+    }
+    fsync(fo); close(fo);
 
-    close(file_fd);
-    printf("[transfer] Saved total %ld bytes to file: %s\n", (long)total_written, output_path);
-    return total_written;
+    uint8_t h2[32]; uint64_t sz2;                                              /* integrity check */
+    int ok = (sha256_file(part, h2, &sz2) == 0 && sz2 == size && !memcmp(h2, hash, 32));
+    if (ok) {
+        if (rename(part, path) < 0) ok = 0; else chmod(path, (mode & 0777) | 0600);
+        unlink(meta);
+    } else { unlink(part); unlink(meta); }
+    return ok;
+}
+
+/* Process management: fork + exec a user program with the new file as argument, then waitpid. */
+void run_hook(const char *path)
+{
+    if (!cfg.hook[0]) return;
+    pid_t p = fork();
+    if (p == 0) { execlp(cfg.hook, cfg.hook, path, (char *)NULL); _exit(127); }
+    if (p > 0) { int st = 0; waitpid(p, &st, 0); log_info("hook '%s' finished (exit %d) for %s", cfg.hook, WIFEXITED(st) ? WEXITSTATUS(st) : -1, path); }
 }

@@ -152,3 +152,120 @@ void close_socket(int sockfd)
         close(sockfd);  /* close() works on sockets just like files */
     }
 }
+
+/* ══════════════ UniSync v2 additions: timeouts, framing, encryption hook ══════════════ */
+#include <errno.h>
+#include <stdint.h>
+#include <sys/time.h>
+#include "crypto.h"
+
+int tcp_listen(int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a; memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_port = htons((uint16_t)port); a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(fd, 16) < 0) { int e = errno; close(fd); errno = e; return -1; }
+    return fd;
+}
+
+void set_timeout(int fd, int secs)
+{
+    struct timeval tv = { secs, 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+
+int tcp_connect(const char *ip, int port, int secs)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    set_timeout(fd, secs);
+    struct sockaddr_in a; memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, ip, &a.sin_addr) != 1) { close(fd); errno = EINVAL; return -1; }
+    if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) { int e = errno; close(fd); errno = e; return -1; }
+    return fd;
+}
+
+static int net_send_raw(int fd, const void *b, size_t n)
+{
+    const uint8_t *p = b;
+    while (n) {
+        ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
+        if (w < 0) { if (errno == EINTR) continue; return -1; }
+        p += w; n -= (size_t)w;
+    }
+    return 0;
+}
+
+static int net_recv_raw(int fd, void *b, size_t n)
+{
+    uint8_t *p = b;
+    while (n) {
+        ssize_t r = recv(fd, p, n, 0);
+        if (r == 0) return -1;                                   /* peer closed */
+        if (r < 0) { if (errno == EINTR) continue; return -1; }  /* error / timeout */
+        p += r; n -= (size_t)r;
+    }
+    return 0;
+}
+
+int net_send(int fd, const void *b, size_t n)
+{
+    if (!crypt_active(fd)) return net_send_raw(fd, b, n);
+    uint8_t *tmp = malloc(n ? n : 1);
+    if (!tmp) return -1;
+    crypt_tx(fd, b, tmp, n);
+    int r = net_send_raw(fd, tmp, n);
+    free(tmp);
+    return r;
+}
+
+int net_recv(int fd, void *b, size_t n)
+{
+    if (net_recv_raw(fd, b, n) < 0) return -1;
+    if (crypt_active(fd)) crypt_rx(fd, b, n);
+    return 0;
+}
+
+int put_u8(int fd, uint8_t v)   { return net_send(fd, &v, 1); }
+int put_u16(int fd, uint16_t v) { uint8_t b[2] = { (uint8_t)(v >> 8), (uint8_t)v }; return net_send(fd, b, 2); }
+int put_u32(int fd, uint32_t v) { uint8_t b[4] = { (uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v }; return net_send(fd, b, 4); }
+int put_u64(int fd, uint64_t v)
+{
+    uint8_t b[8];
+    for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (56 - 8 * i));
+    return net_send(fd, b, 8);
+}
+int put_str(int fd, const char *s)
+{
+    size_t n = strlen(s); if (n > 65535) n = 65535;
+    if (put_u16(fd, (uint16_t)n) < 0) return -1;
+    return n ? net_send(fd, s, n) : 0;
+}
+int get_u8(int fd, uint8_t *v)   { return net_recv(fd, v, 1); }
+int get_u16(int fd, uint16_t *v) { uint8_t b[2]; if (net_recv(fd, b, 2)) return -1; *v = (uint16_t)((b[0] << 8) | b[1]); return 0; }
+int get_u32(int fd, uint32_t *v)
+{
+    uint8_t b[4]; if (net_recv(fd, b, 4)) return -1;
+    *v = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
+    return 0;
+}
+int get_u64(int fd, uint64_t *v)
+{
+    uint8_t b[8]; if (net_recv(fd, b, 8)) return -1;
+    uint64_t r = 0; for (int i = 0; i < 8; i++) r = (r << 8) | b[i];
+    *v = r; return 0;
+}
+int get_str(int fd, char *buf, size_t cap)
+{
+    uint16_t n;
+    if (get_u16(fd, &n) < 0) return -1;
+    if (n >= cap) return -1;                         /* refuse oversize strings */
+    if (n && net_recv(fd, buf, n) < 0) return -1;
+    buf[n] = 0;
+    return 0;
+}

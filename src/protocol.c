@@ -1,182 +1,108 @@
 /*
- * protocol.c — Wire Protocol with File Permissions Support
+ * protocol.c — handshake (PIN challenge/response + optional encryption) and message framing
  */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <endian.h>
-#include <libgen.h>
-
+#include "common.h"
+#include "util.h"
+#include "ui.h"
+#include "network.h"
 #include "protocol.h"
-#include "progress.h"
+#include "sha256.h"
+#include "crypto.h"
+#include "logger.h"
+#include "history.h"
 
-#define CHUNK_SIZE 65536
-
-static ssize_t send_all(int sockfd, const char *buf, size_t len)
+int proto_client_handshake(int fd, char *peername, size_t cap, int *encrypted)
 {
-    size_t total = 0;
-    while (total < len) {
-        ssize_t s = send(sockfd, buf + total, len - total, MSG_NOSIGNAL);
-        if (s <= 0) { perror("\nsend()"); return -1; }
-        total += s;
+    uint8_t rflags, nonce[16], mac[32], st;
+    if (net_send(fd, UNISYNC_MAGIC, UNISYNC_MAGIC_LEN) < 0 || put_u8(fd, UNISYNC_VERSION) < 0 || put_str(fd, cfg.name) < 0) return -1;
+    if (get_u8(fd, &rflags) < 0 || net_recv(fd, nonce, 16) < 0) return -1;
+
+    int need_pin = rflags & 1;
+    if (need_pin && !cfg.pin[0] && ui_ask_pin(cfg.pin, sizeof cfg.pin) < 0) { ui_err("A PIN is required but none was entered."); return -2; }
+    int enc = cfg.encrypt || (rflags & 2);
+    if (enc && !need_pin) { ui_err("Encryption needs a PIN. Start the receiver with:  UniSync receive --pin 1234"); return -2; }
+    if (enc && !cfg.pin[0]) { ui_err("Encryption needs a PIN (use --pin)."); return -2; }
+
+    const char *pin = need_pin ? cfg.pin : "";
+    hmac_sha256((const uint8_t *)pin, strlen(pin), nonce, 16, mac);
+    if (put_u8(fd, enc ? 1 : 0) < 0 || net_send(fd, mac, 32) < 0 || get_u8(fd, &st) < 0) return -1;
+    if (st == 0) { ui_err("Access denied - wrong PIN."); return -2; }
+    if (st == 2) { ui_err("This device only accepts encrypted transfers."); return -2; }
+    if (get_str(fd, peername, cap) < 0) return -1;
+    if (enc) {
+        uint8_t key[32]; crypt_derive_key(cfg.pin, nonce, key);
+        if (crypt_enable(fd, key, 1) < 0) return -1;
     }
-    return total;
-}
-
-static ssize_t recv_all(int sockfd, char *buf, size_t len)
-{
-    size_t total = 0;
-    while (total < len) {
-        ssize_t r = recv(sockfd, buf + total, len - total, 0);
-        if (r <= 0) { return -1; }
-        total += r;
-    }
-    return total;
-}
-
-static ssize_t write_all(int fd, const char *buf, size_t len)
-{
-    size_t total = 0;
-    while (total < len) {
-        ssize_t w = write(fd, buf + total, len - total);
-        if (w <= 0) { perror("\nwrite()"); return -1; }
-        total += w;
-    }
-    return total;
-}
-
-int build_file_header(FileHeader *header, const char *filepath)
-{
-    struct stat st;
-    if (stat(filepath, &st) == -1) {
-        perror("stat() failed");
-        return -1;
-    }
-
-    char path_copy[512];
-    strncpy(path_copy, filepath, sizeof(path_copy) - 1);
-    path_copy[sizeof(path_copy) - 1] = '\0';
-    char *fname = basename(path_copy);
-
-    memset(header, 0, sizeof(FileHeader));
-    memcpy(header->magic, UNISYNC_MAGIC, UNISYNC_MAGIC_LEN);
-    header->version  = UNISYNC_VERSION;
-    header->filesize = (uint64_t)st.st_size;
-    header->mode     = (uint32_t)st.st_mode; /* Capture permissions (e.g. 0755) */
-    strncpy(header->filename, fname, MAX_FILENAME_LEN - 1);
-
+    *encrypted = enc;
     return 0;
 }
 
-int send_file_header(int sockfd, const FileHeader *header)
+int proto_server_handshake(int fd, const char *ip, char *sender, size_t cap, int *encrypted)
 {
-    FileHeader net_header = *header;
-    net_header.version  = htonl(header->version);
-    net_header.filesize = htobe64(header->filesize);
-    net_header.mode     = htonl(header->mode);
+    char magic[UNISYNC_MAGIC_LEN]; uint8_t ver;
+    if (net_recv(fd, magic, UNISYNC_MAGIC_LEN) < 0 || memcmp(magic, UNISYNC_MAGIC, UNISYNC_MAGIC_LEN) != 0) return -1;
+    if (get_u8(fd, &ver) < 0 || ver != UNISYNC_VERSION) return -1;
+    if (get_str(fd, sender, cap) < 0) return -1;
 
-    if (send_all(sockfd, (const char *)&net_header, sizeof(FileHeader)) == -1) {
+    uint8_t nonce[16], mac[32], exp[32], sflags;
+    int rf = open("/dev/urandom", O_RDONLY);
+    if (rf < 0 || fd_read_full(rf, nonce, 16) < 0) { if (rf >= 0) close(rf); return -1; }
+    close(rf);
+    uint8_t rflags = (uint8_t)((cfg.pin[0] ? 1 : 0) | (cfg.encrypt ? 2 : 0));
+    if (put_u8(fd, rflags) < 0 || net_send(fd, nonce, 16) < 0) return -1;
+    if (get_u8(fd, &sflags) < 0 || net_recv(fd, mac, 32) < 0) return -1;
+
+    hmac_sha256((const uint8_t *)cfg.pin, strlen(cfg.pin), nonce, 16, exp);
+    uint8_t diff = 0; for (int i = 0; i < 32; i++) diff |= (uint8_t)(mac[i] ^ exp[i]);   /* constant time */
+    if (diff || ((sflags & 1) && !cfg.pin[0])) {
+        put_u8(fd, 0);
+        ui_warn("Refused %s (%s): wrong PIN", sender, ip);
+        log_error("auth failed from %s (%s)", sender, ip);
+        history_add("RECV", "-", sender, "AUTH-FAILED", 0);
         return -1;
     }
-
-    printf("[protocol] Sent header: file=\"%s\", size=%lu, mode=0%o\n",
-           header->filename, (unsigned long)header->filesize, header->mode & 0777);
+    if (cfg.encrypt && !(sflags & 1)) {
+        put_u8(fd, 2);
+        ui_warn("Refused %s (%s): plaintext not allowed (receiver requires encryption)", sender, ip);
+        log_error("plaintext transfer refused from %s", sender);
+        return -1;
+    }
+    if (put_u8(fd, 1) < 0 || put_str(fd, cfg.name) < 0) return -1;
+    if (sflags & 1) {
+        uint8_t key[32]; crypt_derive_key(cfg.pin, nonce, key);
+        if (crypt_enable(fd, key, 0) < 0) return -1;
+    }
+    *encrypted = sflags & 1;
     return 0;
 }
 
-int receive_file_header(int sockfd, FileHeader *header)
+int proto_send_offer(int fd, const Offer *o)
 {
-    if (recv_all(sockfd, (char *)header, sizeof(FileHeader)) == -1) {
-        return -1;
-    }
-
-    if (memcmp(header->magic, UNISYNC_MAGIC, UNISYNC_MAGIC_LEN) != 0) {
-        fprintf(stderr, "[protocol] Invalid magic number!\n");
-        return -1;
-    }
-
-    header->version  = ntohl(header->version);
-    header->filesize = be64toh(header->filesize);
-    header->mode     = ntohl(header->mode);
-    header->filename[MAX_FILENAME_LEN - 1] = '\0';
-
-    printf("[protocol] Received header: file=\"%s\", size=%lu, mode=0%o\n",
-           header->filename, (unsigned long)header->filesize, header->mode & 0777);
-    return 0;
+    return (put_u32(fd, o->nfiles) < 0 || put_u64(fd, o->total_bytes) < 0 || put_str(fd, o->label) < 0 ||
+            put_u64(fd, o->transfer_id) < 0 || put_u32(fd, o->chunk_size) < 0) ? -1 : 0;
 }
-
-ssize_t send_file_payload(int sockfd, const char *filepath, uint64_t filesize)
+int proto_recv_offer(int fd, Offer *o)
 {
-    int file_fd = open(filepath, O_RDONLY);
-    if (file_fd == -1) { perror("open()"); return -1; }
-
-    char buffer[CHUNK_SIZE];
-    uint64_t total_sent = 0;
-
-    ProgressTracker tracker;
-    progress_init(&tracker, filesize);
-
-    while (total_sent < filesize) {
-        uint64_t remaining = filesize - total_sent;
-        size_t to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-
-        ssize_t r = read(file_fd, buffer, to_read);
-        if (r <= 0) { close(file_fd); return -1; }
-
-        if (send_all(sockfd, buffer, r) == -1) {
-            close(file_fd);
-            return -1;
-        }
-
-        total_sent += r;
-        progress_update(&tracker, r);
-    }
-
-    progress_finish(&tracker);
-    close(file_fd);
-    return (ssize_t)total_sent;
+    if (get_u32(fd, &o->nfiles) < 0 || get_u64(fd, &o->total_bytes) < 0 || get_str(fd, o->label, sizeof o->label) < 0 ||
+        get_u64(fd, &o->transfer_id) < 0 || get_u32(fd, &o->chunk_size) < 0) return -1;
+    return (o->chunk_size >= 4096 && o->chunk_size <= 4u * 1024 * 1024) ? 0 : -1;
 }
+int proto_send_decision(int fd, int accept) { return put_u8(fd, accept ? 1 : 0); }
+int proto_recv_decision(int fd) { uint8_t v; return get_u8(fd, &v) < 0 ? -1 : (v ? 1 : 0); }
 
-ssize_t receive_file_payload(int sockfd, const char *output_path, uint64_t filesize, uint32_t mode)
+int proto_send_dir(int fd, const char *rel, uint32_t mode)
+{ return (put_u8(fd, TAG_DIR) < 0 || put_str(fd, rel) < 0 || put_u32(fd, mode) < 0) ? -1 : 0; }
+int proto_send_file_header(int fd, const FileEntryHeader *h)
 {
-    int file_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (file_fd == -1) { perror("open()"); return -1; }
-
-    char buffer[CHUNK_SIZE];
-    uint64_t total_written = 0;
-
-    ProgressTracker tracker;
-    progress_init(&tracker, filesize);
-
-    while (total_written < filesize) {
-        uint64_t remaining = filesize - total_written;
-        size_t to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-
-        ssize_t r = recv(sockfd, buffer, to_read, 0);
-        if (r <= 0) { close(file_fd); return -1; }
-
-        if (write_all(file_fd, buffer, r) == -1) {
-            close(file_fd);
-            return -1;
-        }
-
-        total_written += r;
-        progress_update(&tracker, r);
-    }
-
-    progress_finish(&tracker);
-    close(file_fd);
-
-    /* Layer 9: Apply captured POSIX permissions to received file */
-    if (chmod(output_path, mode & 0777) == -1) {
-        perror("chmod() failed");
-    }
-
-    return (ssize_t)total_written;
+    return (put_u8(fd, TAG_FILE) < 0 || put_str(fd, h->relpath) < 0 || put_str(fd, h->file_type) < 0 ||
+            put_u64(fd, h->filesize) < 0 || put_u32(fd, h->mode) < 0 || net_send(fd, h->sha256, 32) < 0) ? -1 : 0;
+}
+int proto_send_end(int fd) { return put_u8(fd, TAG_END); }
+int proto_recv_tag(int fd, uint8_t *tag) { return get_u8(fd, tag); }
+int proto_recv_dir(int fd, char *rel, size_t cap, uint32_t *mode)
+{ return (get_str(fd, rel, cap) < 0 || get_u32(fd, mode) < 0) ? -1 : 0; }
+int proto_recv_file_header(int fd, FileEntryHeader *h)
+{
+    return (get_str(fd, h->relpath, sizeof h->relpath) < 0 || get_str(fd, h->file_type, sizeof h->file_type) < 0 ||
+            get_u64(fd, &h->filesize) < 0 || get_u32(fd, &h->mode) < 0 || net_recv(fd, h->sha256, 32) < 0) ? -1 : 0;
 }

@@ -6,13 +6,16 @@
 #include <sys/stat.h>
 
 #include "logger.h"
+#include "util.h"
+#include <string.h>
+#include <limits.h>
 
 static FILE *log_fp = NULL;
 static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void log_init(const char *path)
 {
-    mkdir("logs", 0755);
+    { char d[PATH_MAX]; snprintf(d, sizeof d, "%s", path); char *sl = strrchr(d, '/'); if (sl) { *sl = 0; mkdir_p(d, 0755); } }
     log_fp = fopen(path, "a");
     if (!log_fp) perror("log_init");
 }

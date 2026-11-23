@@ -1,36 +1,32 @@
 CC      = gcc
-CFLAGS  = -Wall -Wextra -Iinclude -pthread
+CFLAGS  = -Wall -Wextra -Iinclude -pthread -D_GNU_SOURCE -O2
 SRCDIR  = src
 OBJDIR  = obj
 BINDIR  = bin
 
-all: $(BINDIR)/UniSync $(BINDIR)/UniSync-server $(BINDIR)/UniSync-client \
-     $(BINDIR)/UniSync-file-receiver $(BINDIR)/UniSync-file-sender \
-     $(BINDIR)/UniSync-discover
+# shared library code
+LIB = util ui network sha256 crypto logger history security discovery protocol transfer progress errors handler
+LIBOBJ = $(LIB:%=$(OBJDIR)/%.o)
+APPOBJ = $(OBJDIR)/main.o $(OBJDIR)/file_sender.o $(OBJDIR)/file_receiver.o $(OBJDIR)/discover_main.o
 
-$(BINDIR)/UniSync: $(OBJDIR)/main.o | $(BINDIR)
+all: $(BINDIR)/UniSync links $(BINDIR)/UniSync-server $(BINDIR)/UniSync-client
+
+# the one program: UniSync receive | send | devices | history ...
+$(BINDIR)/UniSync: $(APPOBJ) $(LIBOBJ) | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(BINDIR)/UniSync-server: $(OBJDIR)/server.o $(OBJDIR)/network.o | $(BINDIR)
+# old command names keep working (they are symlinks to UniSync)
+links: $(BINDIR)/UniSync
+	@cd $(BINDIR) && ln -sf UniSync UniSync-file-receiver && ln -sf UniSync UniSync-file-sender && ln -sf UniSync UniSync-discover
+
+# layer-1 socket demos
+$(BINDIR)/UniSync-server: $(OBJDIR)/server.o $(OBJDIR)/network.o $(OBJDIR)/crypto.o $(OBJDIR)/sha256.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(BINDIR)/UniSync-client: $(OBJDIR)/client.o $(OBJDIR)/network.o | $(BINDIR)
+$(BINDIR)/UniSync-client: $(OBJDIR)/client.o $(OBJDIR)/network.o $(OBJDIR)/crypto.o $(OBJDIR)/sha256.o | $(BINDIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(BINDIR)/UniSync-file-receiver: $(OBJDIR)/file_receiver.o $(OBJDIR)/handler.o \
-    $(OBJDIR)/network.o $(OBJDIR)/protocol.o $(OBJDIR)/progress.o \
-    $(OBJDIR)/errors.o $(OBJDIR)/transfer.o $(OBJDIR)/logger.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
-
-$(BINDIR)/UniSync-file-sender: $(OBJDIR)/file_sender.o $(OBJDIR)/network.o \
-    $(OBJDIR)/protocol.o $(OBJDIR)/progress.o $(OBJDIR)/errors.o \
-    $(OBJDIR)/discovery.o $(OBJDIR)/transfer.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
-
-$(BINDIR)/UniSync-discover: $(OBJDIR)/discover_main.o $(OBJDIR)/discovery.o | $(BINDIR)
-	$(CC) $(CFLAGS) -o $@ $^
-
-$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
+$(OBJDIR)/%.o: $(SRCDIR)/%.c include/*.h | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR):
@@ -39,7 +35,13 @@ $(OBJDIR):
 $(BINDIR):
 	mkdir -p $(BINDIR)
 
-clean:
-	rm -rf $(OBJDIR)/* $(BINDIR)/*
+test: all
+	bash tests/run_tests.sh
 
-.PHONY: all clean
+install: all
+	install -m 755 $(BINDIR)/UniSync /usr/local/bin/UniSync
+
+clean:
+	rm -rf $(OBJDIR) $(BINDIR)
+
+.PHONY: all links clean test install

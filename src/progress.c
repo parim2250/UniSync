@@ -1,72 +1,66 @@
 /*
- * progress.c — Renders progress bar with speed (MB/s) and %
+ * progress.c — progress bar with percent, MB, speed and ETA
  */
-
-#include <stdio.h>
-#include <time.h>
+#include "common.h"
+#include "util.h"
+#include "ui.h"
 #include "progress.h"
 
-#define BAR_WIDTH 30
+#define BAR_WIDTH 28
 
-static double get_elapsed_sec(struct timespec *start, struct timespec *end)
+static pthread_mutex_t plock = PTHREAD_MUTEX_INITIALIZER;
+static int active = 0, next_id = 1;
+
+void progress_init(ProgressTracker *t, const char *peer, int receiving, uint64_t total_bytes)
 {
-    return (end->tv_sec - start->tv_sec) + (end->tv_nsec - start->tv_nsec) / 1e9;
+    memset(t, 0, sizeof *t);
+    t->receiving = receiving; t->total_bytes = total_bytes;
+    snprintf(t->peer, sizeof t->peer, "%s", peer);
+    t->start = now_sec();
+    pthread_mutex_lock(&plock); t->id = next_id++; active++; pthread_mutex_unlock(&plock);
 }
 
-void progress_init(ProgressTracker *tracker, uint64_t total_bytes)
+void progress_file(ProgressTracker *t, const char *file) { snprintf(t->file, sizeof t->file, "%s", file); }
+void progress_skip(ProgressTracker *t, uint64_t b)       { t->transferred_bytes += b; }
+void progress_set_done(ProgressTracker *t, uint64_t d)   { t->transferred_bytes = d; }
+
+static void render(const ProgressTracker *t, char *out, size_t cap)
 {
-    tracker->total_bytes = total_bytes;
-    tracker->transferred_bytes = 0;
-    clock_gettime(CLOCK_MONOTONIC, &tracker->start_time);
-    tracker->last_update = tracker->start_time;
+    double el = now_sec() - t->start; if (el < 0.001) el = 0.001;
+    double speed = (double)t->moved_bytes / el;
+    int pct = t->total_bytes ? (int)(t->transferred_bytes * 100 / t->total_bytes) : 100;
+    if (pct > 100) pct = 100;
+    int filled = pct * BAR_WIDTH / 100;
+    char bar[256] = "";
+    for (int i = 0; i < BAR_WIDTH; i++) strcat(bar, i < filled ? "\xe2\x96\x88" : "\xe2\x96\x91");
+    char d[32], tot[32], sp[32], eta[24] = "";
+    fmt_size(t->transferred_bytes, d, sizeof d); fmt_size(t->total_bytes, tot, sizeof tot);
+    fmt_size((uint64_t)speed, sp, sizeof sp);
+    if (speed > 1 && t->total_bytes > t->transferred_bytes)
+        snprintf(eta, sizeof eta, "ETA %ds", (int)((double)(t->total_bytes - t->transferred_bytes) / speed) + 1);
+    snprintf(out, cap, "%s%s%s %s%s%s %3d%%  %s / %s  %s%s/s%s  %-8s %s%.24s%s",
+             t->receiving ? C_MAG : C_CYN, t->receiving ? "\xe2\x86\x93" : "\xe2\x86\x91", C_RST,
+             t->receiving ? C_MAG : C_CYN, bar, C_RST, pct, d, tot, C_GRN, sp, C_RST, eta, C_DIM, t->file, C_RST);
 }
 
-void progress_update(ProgressTracker *tracker, uint64_t bytes_added)
+void progress_update(ProgressTracker *t, uint64_t n)
 {
-    tracker->transferred_bytes += bytes_added;
-
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-
-    /* Limit terminal updates to every 50ms to avoid flicker */
-    if (get_elapsed_sec(&tracker->last_update, &now) < 0.05 && 
-        tracker->transferred_bytes < tracker->total_bytes) {
-        return;
-    }
-    tracker->last_update = now;
-
-    double percent = 0.0;
-    if (tracker->total_bytes > 0) {
-        percent = (double)tracker->transferred_bytes / tracker->total_bytes * 100.0;
-    }
-
-    int filled = (int)(percent / 100.0 * BAR_WIDTH);
-    if (filled > BAR_WIDTH) filled = BAR_WIDTH;
-
-    double elapsed = get_elapsed_sec(&tracker->start_time, &now);
-    double speed_mb = 0.0;
-    if (elapsed > 0.001) {
-        speed_mb = (tracker->transferred_bytes / (1024.0 * 1024.0)) / elapsed;
-    }
-
-    double transferred_mb = tracker->transferred_bytes / (1024.0 * 1024.0);
-    double total_mb       = tracker->total_bytes / (1024.0 * 1024.0);
-
-    /* Render bar: [=========>          ] 45.2% (5.1/10.0 MB) @ 12.3 MB/s */
-    printf("\r[");
-    for (int i = 0; i < BAR_WIDTH; i++) {
-        if (i < filled) printf("=");
-        else if (i == filled) printf(">");
-        else printf(" ");
-    }
-    printf("] %5.1f%% (%6.1f/%6.1f MB) @ %5.1f MB/s",
-           percent, transferred_mb, total_mb, speed_mb);
-
-    fflush(stdout);
+    t->transferred_bytes += n; t->moved_bytes += n;
+    double now = now_sec();
+    int inplace = g_color && active == 1;
+    if (now - t->last_print < (inplace ? 0.1 : 1.0) && t->transferred_bytes < t->total_bytes) return;
+    t->last_print = now;
+    char l[700]; render(t, l, sizeof l);
+    if (inplace) us_print("\r\033[K  %s", l); else ui_line("  [T%d] %s", t->id, l);
 }
 
-void progress_finish(ProgressTracker *tracker)
+void progress_finish(ProgressTracker *t, const char *status, int ok)
 {
-    progress_update(tracker, 0);
-    printf("\n");
+    double el = now_sec() - t->start; if (el < 0.001) el = 0.001;
+    char sz[32], sp[32];
+    fmt_size(t->transferred_bytes, sz, sizeof sz);
+    fmt_size((uint64_t)((double)t->moved_bytes / el), sp, sizeof sp);
+    pthread_mutex_lock(&plock); active--; pthread_mutex_unlock(&plock);
+    if (ok) ui_ok("%s %s - %s (%s in %.1fs, avg %s/s)", t->receiving ? "From" : "To", t->peer, status, sz, el, sp);
+    else    ui_err("%s %s - %s", t->receiving ? "From" : "To", t->peer, status);
 }
