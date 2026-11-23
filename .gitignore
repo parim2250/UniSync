@@ -6,3 +6,6 @@ logs/
 downloads/
 *.bin
 .DS_Store
+
+*.iso
+/photos/
